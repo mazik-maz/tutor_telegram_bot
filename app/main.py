@@ -7,13 +7,17 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.types import BotCommand
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
+
+from aiohttp import ClientTimeout
 
 from app.config import settings
 from app.middlewares.db import DBSessionMiddleware
-from app.handlers import common_router, lessons_router, homework_router, students_router
+from app.handlers import common_router, lessons_router, homework_router, students_router, settings_router
 from app.models.db import Base, engine
 from app.services import scheduler as sched_mod
 
+aio_session = AiohttpSession(timeout=25)
 
 async def _set_commands(bot: Bot):
     await bot.set_my_commands(
@@ -49,6 +53,7 @@ async def main() -> None:
     bot = Bot(
         token=settings.BOT_TOKEN,
         default=DefaultBotProperties(parse_mode="HTML"),
+        session=aio_session,
     )
     storage = RedisStorage.from_url(settings.REDIS_URL)
 
@@ -68,6 +73,7 @@ async def main() -> None:
     dp.include_router(lessons_router)
     dp.include_router(homework_router)
     dp.include_router(students_router)
+    dp.include_router(settings_router)
 
     # startup callback
     dp.startup.register(on_startup)

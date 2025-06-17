@@ -6,7 +6,7 @@ TUTOR_MENU = ReplyKeyboardMarkup(resize_keyboard=True, is_persistent=True, keybo
     [KeyboardButton(text="📚 Расписание"), KeyboardButton(text="📒 Все ДЗ")],
     [KeyboardButton(text="✏️ Задать ДЗ"), KeyboardButton(text="✅ Проверить ДЗ")],
     [KeyboardButton(text="➕ Ученика"), KeyboardButton(text="👥 Мои ученики")],
-    []
+    [KeyboardButton(text="⚙️ Настройки")]
 ])
 
 # student main menu
