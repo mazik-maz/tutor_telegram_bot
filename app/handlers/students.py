@@ -11,6 +11,7 @@ from aiogram.types import (
     KeyboardButton,
 )
 from sqlalchemy import select, func
+from sqlalchemy.orm import selectinload
 
 from datetime import datetime, timedelta
 
@@ -28,11 +29,13 @@ class AddStudent(StatesGroup):
 
 class ViewStudent(StatesGroup):
     choosing_student = State()
-    waiting_comment = State()
+    waiting_new_value = State()
+    field = State()
+    choosing = State()
 
 
 # ──────────────────── helper keyboards ──────────────────── #
-def _students_kb(students: list[User]) -> ReplyKeyboardMarkup:
+def kb_students(students: list[User]) -> ReplyKeyboardMarkup:
     mas = []
     for st in students:
         mas.append([KeyboardButton(text=st.full_name)])
@@ -40,12 +43,30 @@ def _students_kb(students: list[User]) -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=mas)
     return kb
 
-def _detail_kb() -> ReplyKeyboardMarkup:
+def kb_details() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
-        [KeyboardButton(text="✏️ Изменить комментарий")],
+        [
+            KeyboardButton(text="✏️ Имя"),
+            KeyboardButton(text="🌍 UTC"),
+            KeyboardButton(text="📞 Родитель"),
+        ],
+        [KeyboardButton(text="💬 Комментарий")],
         [KeyboardButton(text="↩️ Назад")],
     ])
 
+async def show_student(msg: Message, st: User, *, next_lesson: Lesson | None, awaiting: int, pending: int):
+    when = "не запланировано"
+    if next_lesson:
+        loc = next_lesson.scheduled_time + timedelta(hours=st.timezone_offset)
+        when = loc.strftime("%d.%m %H:%M")
+    txt = (
+        f"<b>{st.full_name}</b>  (UTC{st.timezone_offset:+})\n"
+        f"Контакт родителя: {st.parent_contact or '<i>не указан</i>'}\n\n"
+        f"<b>Следующий урок:</b> {when}\n"
+        f"<b>ДЗ:</b> {awaiting} ждут ответа, {pending} на проверке\n\n"
+        f"<b>Комментарий:</b> {st.comment or '<i>нет</i>'}"
+    )
+    await msg.answer(txt, parse_mode="HTML", reply_markup=kb_details())
 
 # ──────────────────── list & detail ──────────────────── #
 @router.message(Command("students"))
@@ -54,14 +75,13 @@ async def list_students(msg: Message, session, state: FSMContext):
     tutor: User | None = (
         await session.execute(select(User).where(User.telegram_id == msg.from_user.id))
     ).scalar()
-
     if not tutor or not tutor.is_tutor:
         await msg.answer("Команда доступна только для репетитора.")
         return
 
     students = (
         await session.execute(
-            select(User).where(User.tutor_id == tutor.id, User.is_tutor.is_(False))
+            select(User).where(User.tutor_id == tutor.id, User.is_tutor.is_(False)).order_by(User.full_name)
         )
     ).scalars().all()
 
@@ -72,19 +92,9 @@ async def list_students(msg: Message, session, state: FSMContext):
         )
         return
 
-    await msg.answer("Выберите ученика:", reply_markup=_students_kb(students))
+    await msg.answer("Выберите ученика:", reply_markup=kb_students(students))
     await state.update_data(st_map={s.full_name: s.id for s in students})
     await state.set_state(ViewStudent.choosing_student)
-
-
-# ——— edit comment ——— #
-@router.message(ViewStudent.choosing_student, F.text == "✏️ Изменить комментарий")
-async def edit_comment_prompt(msg: Message, state: FSMContext):
-    await msg.answer(
-        "Отправьте новый комментарий (или '-' чтобы удалить):",
-        reply_markup=ReplyKeyboardRemove(),
-    )
-    await state.set_state(ViewStudent.waiting_comment)
 
 
 @router.message(ViewStudent.choosing_student)
@@ -101,7 +111,13 @@ async def show_student_detail(msg: Message, state: FSMContext, session):
         await msg.answer("Выберите ученика из меню.")
         return
 
-    student: User = await session.get(User, st_id)
+    student: User = (
+        await session.execute(
+            select(User)
+            .options(selectinload(User.lessons_as_student))
+            .where(User.id == st_id)
+        )
+    ).scalar()
 
     # Next lesson
     now = datetime.utcnow()
@@ -117,12 +133,6 @@ async def show_student_detail(msg: Message, state: FSMContext, session):
             .limit(1)
         )
     ).scalar()
-
-    if next_less:
-        loc_time = next_less.scheduled_time + timedelta(hours=student.timezone_offset)
-        lesson_str = loc_time.strftime("%d.%m %H:%M")
-    else:
-        lesson_str = "не запланировано"
 
     # Homework stats
     awaiting = (
@@ -144,40 +154,65 @@ async def show_student_detail(msg: Message, state: FSMContext, session):
         )
     ).scalar_one()
 
-    comment = student.comment or "<i>нет комментария</i>"
+    await state.update_data(cur=st_id)
+    await show_student(msg, student, next_lesson=next_less, awaiting=awaiting, pending=pending)
+    await state.set_state(ViewStudent.choosing)
 
-    text = (
-        f"<b>{student.full_name}</b> (UTC{student.timezone_offset:+})\n"
-        f"Следующий урок: {lesson_str}\n"
-        f"ДЗ: {awaiting} ждут ответа, {pending} на проверке\n\n"
-        f"<b>Комментарий:</b> {comment}"
-    )
-    await msg.answer(text, parse_mode="HTML", reply_markup=_detail_kb())
-    await state.update_data(cur_student_id=st_id)
+# ╭────────────────────────── Запрос нового значения ─────────────────╮
+@router.message(ViewStudent.choosing, F.text.in_(("✏️ Имя", "🌍 UTC", "📞 Родитель", "💬 Комментарий")))
+async def ask_new_value(msg: Message, state: FSMContext):
+    field_map = {
+        "✏️ Имя": ("name", "Введите новое имя:"),
+        "🌍 UTC": ("tz", "Введите смещение UTC (−12…+14):"),
+        "📞 Родитель": ("parent", "Введите контакт родителя («-» чтобы очистить):"),
+        "💬 Комментарий": ("comment", "Введите комментарий («-» чтобы удалить):"),
+    }
+    field, prompt = field_map[msg.text]
+    await state.update_data(edit_field=field)
+    await msg.answer(prompt, reply_markup=ReplyKeyboardRemove())
+    await state.set_state(ViewStudent.waiting_new_value)
 
+# ╭────────────────────────── Сохраняем изменение ────────────────────╮
+@router.message(ViewStudent.waiting_new_value)
+async def save_new_value(msg: Message, state: FSMContext, session):
+    data = await state.get_data()
+    st: User = await session.get(User, data["cur"])
+    field = data["edit_field"]
 
-@router.message(ViewStudent.waiting_comment)
-async def save_comment(msg: Message, state: FSMContext, session):
-    st_id = (await state.get_data()).get("cur_student_id")
-    if not st_id:
-        await msg.answer("Ошибка состояния. Начните сначала.", reply_markup=TUTOR_MENU)
+    if field == "name":
+        value = msg.text.strip()
+        if not value:
+            await msg.answer("Имя не может быть пустым. Попробуйте снова:")
+            return
+        st.full_name = value
+    elif field == "tz":
+        try:
+            offset = int(msg.text.strip())
+            if offset < -12 or offset > 14:
+                raise ValueError
+        except ValueError:
+            await msg.answer("Введите целое число от −12 до +14:")
+            return
+        st.timezone_offset = offset
+    elif field == "parent":
+        st.parent_contact = None if msg.text.strip() == "-" else msg.text.strip()
+    elif field == "comment":
+        st.comment = None if msg.text.strip() == "-" else msg.text.strip()
+    else:
         await state.clear()
+        await msg.answer("Отмена.", reply_markup=TUTOR_MENU)
         return
 
-    student: User = await session.get(User, st_id)
-    new_text = msg.text.strip()
-    student.comment = None if new_text == "-" else new_text
-    await msg.answer("✅ Комментарий обновлён.", reply_markup=_detail_kb())
-
-    # Вернуться к карточке
-    await state.set_state(ViewStudent.choosing_student)
+    await msg.answer("✅ Сохранено.", reply_markup=kb_details())
+    # заново покажем карточку
+    await state.clear()
     await list_students(msg, session, state)
 
-
+# ╭────────────────────────── «Назад» из карточки ────────────────────╮
 @router.message(ViewStudent.choosing_student, F.text == "↩️ Назад")
 async def back_to_list(msg: Message, state: FSMContext, session):
+    await state.clear()
     await list_students(msg, session, state)
-
 
 # ──────────────────── add student ──────────────────── #
 @router.message(Command("add_student"))
