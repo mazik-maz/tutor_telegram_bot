@@ -80,12 +80,19 @@ class Homework(Base):
     tutor_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"))
     student_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"))
 
+    # ───── содержание задания ─────
     text = Column(String, default="")
-    files = Column(JSON, default=list)            # список file_id
+    files = Column(JSON, default=list)
 
+    # ───── ответ ученика ─────
     answer_text = Column(String, nullable=True)
     answer_files = Column(JSON, nullable=True)
 
     assigned_at = Column(DateTime, default=datetime.utcnow)
     answered_at = Column(DateTime, nullable=True)
     checked = Column(Boolean, default=False)
+
+    # ───── связи (добавлено) ─────
+    tutor = relationship("User", foreign_keys=[tutor_id])
+    student = relationship("User", foreign_keys=[student_id])
+

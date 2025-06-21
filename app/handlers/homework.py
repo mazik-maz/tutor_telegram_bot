@@ -3,9 +3,16 @@ from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
-    Message, ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton,
+    Message,
+    CallbackQuery,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+    KeyboardButton,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
 )
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from app.keyboards.menus import TUTOR_MENU, STUDENT_MENU
 from app.models.models import User, Homework
 from app.config import settings
@@ -20,11 +27,12 @@ class HWCreate(StatesGroup):
     waiting_text = State()
     waiting_files = State()
 
-
 class HWAnswer(StatesGroup):
     choosing_hw = State()
     waiting_reply = State()
 
+class HWComment(StatesGroup):
+    waiting_comment = State()
 
 # ──────────────────────── helpers ──────────────────────── #
 def students_kb(students: List[User]) -> ReplyKeyboardMarkup:
@@ -35,28 +43,44 @@ def students_kb(students: List[User]) -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=mas)
     return kb
 
+def kb_details(hw_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Принять", callback_data=f"hw_ok:{hw_id}"),
+            InlineKeyboardButton(text="🔄 На доработку", callback_data=f"hw_redo:{hw_id}"),
+        ],
+        [InlineKeyboardButton(text="↩︎ Назад", callback_data="hw_back")]
+    ])
 
-def cancel_if_requested(msg: Message, state: FSMContext) -> bool:
-    """Если пользователь нажал кнопку '↩️ Отмена' — выходим из FSM."""
-    if msg.text and msg.text.strip().startswith("↩️"):
-        state.clear()
-        # Покажем нужное меню
-        if "Репетитор" in msg.from_user.full_name or msg.from_user.id in map(
-            int, (settings.ALLOWED_TUTOR_IDS or "").split(",")
-        ):
-            menu = TUTOR_MENU
+def kb_open(hw_id: int) -> InlineKeyboardMarkup:
+    """кнопка «Открыть» в списке работ"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👁 Открыть", callback_data=f"hw_view:{hw_id}")]
+    ])
+
+async def _send_files(bot, chat_id: int, file_ids: list[str]):
+    for fid in file_ids or []:
+        try:
+            await bot.send_photo(chat_id, fid)
+        except Exception:
+            await bot.send_document(chat_id, fid)
+
+async def _send_hw_details(bot, chat_id: int, hw: Homework, *, include_answer: bool):
+    await bot.send_message(chat_id, f"<b>ДЗ #{hw.id}</b>\n{hw.text or '<без текста>'}", parse_mode="HTML")
+    await _send_files(bot, chat_id, hw.files or [])
+    if include_answer:
+        if hw.answer_text or hw.answer_files:
+            await bot.send_message(chat_id, "Ответ ученика:")
+            if hw.answer_text:
+                await bot.send_message(chat_id, hw.answer_text)
+            await _send_files(bot, chat_id, hw.answer_files or [])
         else:
-            menu = STUDENT_MENU
-        msg.answer("Операция отменена.", reply_markup=menu)
-        return True
-    return False
-
+            await bot.send_message(chat_id, "Ответ ученика пока отсутствует.")
 
 # ────────────────────────  GIVE HOMEWORK (tutor) ──────────────────────── #
 @router.message(Command("give_homework"))
 @router.message(F.text == "✏️ Задать ДЗ")
 async def give_hw_start(msg: Message, session, state: FSMContext):
-    """Начало диалога выдачи домашнего задания (для репетитора)."""
     tutor: User | None = (await session.execute(
         select(User).where(User.telegram_id == msg.from_user.id))
     ).scalar()
@@ -77,7 +101,9 @@ async def give_hw_start(msg: Message, session, state: FSMContext):
 
 @router.message(HWCreate.choosing_student)
 async def give_hw_choose_student(msg: Message, state: FSMContext):
-    if cancel_if_requested(msg, state):
+    if msg.text.startswith("↩️"):
+        await state.clear()
+        await msg.answer("Отмена.", reply_markup=TUTOR_MENU)
         return
     data = await state.get_data()
     st_id = data["student_map"].get(msg.text.strip())
@@ -90,7 +116,6 @@ async def give_hw_choose_student(msg: Message, state: FSMContext):
         reply_markup=ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[KeyboardButton(text="/done")]]),
     )
     await state.set_state(HWCreate.waiting_text)
-
 
 @router.message(HWCreate.waiting_text, F.text == "/done")
 async def give_hw_finish(msg: Message, session, state: FSMContext):
@@ -105,22 +130,13 @@ async def give_hw_finish(msg: Message, session, state: FSMContext):
         text=data.get("text", ""),
         files=data.get("files", []),
         assigned_at=datetime.utcnow(),
+        answered_at=None,
     )
     session.add(hw)
-    await session.flush()  # получаем hw.id до коммита
-    # Уведомляем ученика о новом ДЗ
+    await session.flush()
     student: User = await session.get(User, student_id)
     await msg.answer("✅ Домашнее задание сохранено и отправлено ученику.", reply_markup=TUTOR_MENU)
-    await msg.bot.send_message(
-        student.telegram_id,
-        f"Вам новое ДЗ от репетитора:\n{hw.text or '<без текста>'}",
-        reply_markup=STUDENT_MENU,
-    )
-    for fid in hw.files:
-        try:
-            await msg.bot.send_photo(student.telegram_id, fid)
-        except Exception:
-            await msg.bot.send_document(student.telegram_id, fid)
+    await _send_hw_details(msg.bot, student.telegram_id, hw, include_answer=False)
     await msg.bot.send_message(
         student.telegram_id,
         "Когда будете готовы, отправьте ответ командой /answer_homework.",
@@ -131,22 +147,13 @@ async def give_hw_finish(msg: Message, session, state: FSMContext):
 @router.message(HWCreate.waiting_text, F.text | F.photo | F.document)
 async def give_hw_collect_files(msg: Message, state: FSMContext):
     # собираем file_id любых media
-    if msg.photo:
-        fid = msg.photo[-1].file_id
-        data = await state.get_data()
-        files = data.get("files", [])
-        files.append(fid)
-        await state.update_data(files=files)
-    elif msg.document:
-        fid = msg.document.file_id
+    if msg.photo or msg.document:
+        fid = msg.photo[-1].file_id if msg.photo else msg.document.file_id
         data = await state.get_data()
         files = data.get("files", [])
         files.append(fid)
         await state.update_data(files=files)
     else:
-        if cancel_if_requested(msg, state):
-            return
-        # конкатенируем, если текст приходит несколькими сообщениями
         data = await state.get_data()
         new_text = (data.get("text") or "") + ("\n" if data.get("text") else "") + msg.text
         await state.update_data(text=new_text)
@@ -182,21 +189,30 @@ async def hw_answer_start(msg: Message, session, state: FSMContext):
 
 
 @router.message(HWAnswer.choosing_hw)
-async def hw_answer_choose(msg: Message, state: FSMContext):
-    if cancel_if_requested(msg, state):
+async def hw_answer_choose(msg: Message, session, state: FSMContext):
+    if msg.text.startswith("↩️"):
+        await state.clear()
+        await msg.answer("Отмена.", reply_markup=STUDENT_MENU)
         return
     mapping = (await state.get_data())["hw_map"]
     hw_id = mapping.get(msg.text.strip())
     if not hw_id:
         await msg.answer("Нажмите кнопку из списка.")
         return
-    await state.update_data(hw_id=hw_id, answer_text="", answer_files=[])
+    hw: Homework = await session.get(Homework, hw_id)
+    await _send_hw_details(msg.bot, msg.chat.id, hw, include_answer=False)
     await msg.answer(
-        "Отправьте ответ (текст/файлы). Завершите /done.",
-        reply_markup=ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[KeyboardButton(text="/done")]]),
+        "Отправьте решение (текст/файлы). Когда закончите — /done. "
+        "Если хотите вернуться позже — /later",
+        reply_markup=ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[KeyboardButton(text="/done"), KeyboardButton(text="/later")]]),
     )
+    await state.update_data(hw_id=hw_id, answer_text="", answer_files=[])
     await state.set_state(HWAnswer.waiting_reply)
     
+@router.message(HWAnswer.waiting_reply, F.text == "/later")
+async def answer_later(msg: Message, state: FSMContext):
+    await state.clear()
+    await msg.answer("Хорошо, вернётесь позже.", reply_markup=STUDENT_MENU)
 
 @router.message(HWAnswer.waiting_reply, F.text == "/done")
 async def hw_answer_finish(msg: Message, session, state: FSMContext):
@@ -207,38 +223,24 @@ async def hw_answer_finish(msg: Message, session, state: FSMContext):
     hw.answered_at = datetime.utcnow()
     await msg.answer("✅ Ответ отправлен репетитору.", reply_markup=STUDENT_MENU)
     tutor: User = await session.get(User, hw.tutor_id)
+    await _send_hw_details(msg.bot, tutor.telegram_id, hw, include_answer=True)
     await msg.bot.send_message(
         tutor.telegram_id,
         f"📨 Ученик {msg.from_user.full_name} отправил решение по ДЗ #{hw.id}.",
         reply_markup=TUTOR_MENU,
     )
-    if hw.answer_text:
-        await msg.bot.send_message(tutor.telegram_id, hw.answer_text)
-    for fid in hw.answer_files or []:
-        try:
-            await msg.bot.send_photo(tutor.telegram_id, fid)
-        except Exception:
-            await msg.bot.send_document(tutor.telegram_id, fid)
     await state.clear()
 
 
 @router.message(HWAnswer.waiting_reply, F.text | F.photo | F.document)
 async def hw_answer_collect_files(msg: Message, state: FSMContext):
-    if msg.photo:
-        fid = msg.photo[-1].file_id
-        data = await state.get_data()
-        files = data.get("answer_files", [])
-        files.append(fid)
-        await state.update_data(answer_files=files)
-    elif msg.document:
-        fid = msg.document.file_id
+    if msg.photo or msg.document:
+        fid = msg.photo[-1].file_id if msg.photo else msg.document.file_id
         data = await state.get_data()
         files = data.get("answer_files", [])
         files.append(fid)
         await state.update_data(answer_files=files)
     else:
-        if cancel_if_requested(msg, state):
-            return
         data = await state.get_data()
         txt = (data.get("answer_text") or "") + ("\n" if data.get("answer_text") else "") + msg.text
         await state.update_data(answer_text=txt)
@@ -249,98 +251,142 @@ async def hw_answer_collect_files(msg: Message, state: FSMContext):
 @router.message(F.text == "📒 Мои ДЗ")
 @router.message(F.text == "📒 Все ДЗ")
 async def list_homeworks(msg: Message, session):
-    """Вывод всех ДЗ для репетитора или ученика."""
     user: User = (await session.execute(
         select(User).where(User.telegram_id == msg.from_user.id))
     ).scalar()
     if user.is_tutor:
-        # Загружаем все ДЗ репетитора вместе с данными учеников одним запросом (JOIN)
-        rows = (await session.execute(
-            select(Homework, User).join(User, Homework.student_id == User.id)
-            .where(Homework.tutor_id == user.id))
-        ).all()
-        lines = ["Все домашние задания"]
-        for hw, st in rows:
-            status = " ждёт ответа"
-            if hw.answered_at:
-                status = "⏳ на проверке" if not hw.checked else "✅ проверено"
-            short = (hw.text[:25] + "...") if hw.text and len(hw.text) > 25 else (hw.text or "<без текста>")
-            lines.append(f"• {st.full_name}: {short} – {status}")
-        await msg.answer("\n".join(lines), parse_mode="HTML", reply_markup=TUTOR_MENU)
+        hws = (
+            await session.execute(
+                select(Homework)
+                .options(selectinload(Homework.student))
+                .where(Homework.tutor_id == user.id)
+            )
+        ).scalars().all()
+        header = "<b>Активные ДЗ</b>"
+        menu = TUTOR_MENU
     else:
         hws = (await session.execute(
             select(Homework).where(Homework.student_id == user.id))
         ).scalars().all()
-        lines = ["Мои домашние задания"]
-        for hw in hws:
-            status = "❌ не выполнено"
-            if hw.answered_at:
-                status = "⏳ на проверке" if not hw.checked else "✅ проверено"
-            short = (hw.text[:25] + "...") if hw.text and len(hw.text) > 25 else (hw.text or "<без текста>")
-            lines.append(f"• {short} – {status}")
-        await msg.answer("\n".join(lines), parse_mode="HTML", reply_markup=STUDENT_MENU)
+        header = "<b>Мои ДЗ</b>"
+        menu = STUDENT_MENU
 
+    if not hws:
+        await msg.answer("Нет активных ДЗ.", reply_markup=menu)
+        return
+
+    lines = [header]
+    for hw in hws:
+        status = (
+            "⌛ ждёт ответа" if hw.answered_at is None else
+            "🕒 на проверке" if not hw.answer_files and not hw.answer_text else
+            "📬 ответ отправлен"
+        )
+        who = f" — {hw.student.full_name}" if user.is_tutor else ""
+        short = (hw.text[:30] + "…") if hw.text and len(hw.text) > 30 else (hw.text or "—")
+        lines.append(f"• #{hw.id}{who}: {short} ({status})")
+
+    await msg.answer("\n".join(lines), parse_mode="HTML", reply_markup=menu)
 
 @router.message(Command("pending"))
-async def list_pending(msg: Message, session):
-    """Вывод ДЗ, ожидающих проверки (для репетитора) или отправленных и непроверенных (для ученика)."""
-    user: User = (await session.execute(
-        select(User).where(User.telegram_id == msg.from_user.id))
-    ).scalar()
-    if user.is_tutor:
-        # Получаем все сданные, но не проверенные ДЗ репетитора вместе с данными учеников
-        pending_rows = (await session.execute(
-            select(Homework, User).join(User, Homework.student_id == User.id)
-            .where(Homework.tutor_id == user.id, Homework.answered_at.is_not(None), Homework.checked.is_(False)))
-        ).all()
-        if not pending_rows:
-            await msg.answer("Нет работ, ожидающих проверки.", reply_markup=TUTOR_MENU)
-            return
-        lines = ["Ожидают проверки"]
-        for hw, st in pending_rows:
-            date = hw.answered_at.strftime("%d.%m %H:%M")
-            lines.append(f"• #{hw.id} от {st.full_name} ({date})")
-        await msg.answer("\n".join(lines), parse_mode="HTML", reply_markup=TUTOR_MENU)
-    else:
-        pending = (await session.execute(
-            select(Homework).where(Homework.student_id == user.id, Homework.answered_at.is_not(None), Homework.checked.is_(False)))
-        ).scalars().all()
-        if not pending:
-            await msg.answer("Нет отправленных Вами заданий, ожидающих проверки.", reply_markup=STUDENT_MENU)
-            return
-        lines = ["Мои отправленные, ещё не проверены:"]
-        for hw in pending:
-            date = hw.answered_at.strftime("%d.%m %H:%M")
-            lines.append(f"• ДЗ #{hw.id} – отправлено {date}")
-        await msg.answer("\n".join(lines), parse_mode="HTML", reply_markup=STUDENT_MENU)
-
-
-# ────────────────────────  CHECK  ──────────────────────── #
-@router.message(Command("check_homework"))
 @router.message(F.text == "✅ Проверить ДЗ")
-async def check_homework_cmd(msg: Message, session):
-    parts = msg.text.split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].isdigit():
-        await msg.answer("Использование: /check_homework <ID>")
-        return
-    hw_id = int(parts[1])
-    hw: Homework | None = await session.get(Homework, hw_id)
-    if not hw:
-        await msg.answer("ДЗ не найдено.")
-        return
-    if hw.checked:
-        await msg.answer("Уже отмечено как проверенное.")
-        return
+async def list_pending(msg: Message, session):
     tutor: User = (await session.execute(
         select(User).where(User.telegram_id == msg.from_user.id))
     ).scalar()
-    if hw.tutor_id != tutor.id:
-        await msg.answer("Это не ваше задание.")
+    if not tutor or not tutor.is_tutor:
         return
-    hw.checked = True
-    await msg.answer("✅ Отмечено как проверенное.", reply_markup=TUTOR_MENU)
+    
+    hws = (
+        await session.execute(
+            select(Homework)
+            .options(selectinload(Homework.student))
+            .where(Homework.tutor_id == tutor.id, Homework.answered_at.is_not(None))
+        )
+    ).scalars().all()
+
+    if not hws:
+        await msg.answer("Нет работ на проверку.", reply_markup=TUTOR_MENU)
+        return
+    for hw in hws:
+        title = hw.text[:50] or "—"
+        msg.answer(f"{hw}")
+        await msg.answer(
+            f"<b>ДЗ #{hw.id}</b> от {hw.student.full_name}\n{title}",
+            parse_mode="HTML",
+            reply_markup=kb_open(hw.id),
+        )
+
+@router.callback_query(F.data.startswith("hw_view"))
+async def hw_view(cb: CallbackQuery, session):
+    hw_id = int(cb.data.split(":")[1])
+    hw: Homework | None = await session.get(Homework, hw_id)
+    if not hw:
+        await cb.answer("Уже обработано.")
+        return
+    await _send_hw_details(cb.bot, cb.from_user.id, hw, include_answer=True)
+    await cb.message.answer("Выберите действие:", reply_markup=kb_details(hw.id))
+    await cb.answer()
+
+@router.callback_query(F.data == "hw_back")
+async def hw_back(cb: CallbackQuery):
+    await cb.message.delete()
+    await cb.answer("Вернулись к списку.")
+
+@router.callback_query(F.data.startswith("hw_ok"))
+async def hw_ok_ask_comment(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    hw_id = int(cb.data.split(":")[1])
+    await state.update_data(hw_id=hw_id, action="ok", src_msg=cb.message.message_id)
+    await cb.message.answer("Напишите комментарий для ученика (или «-» без комментария):")
+    await state.set_state(HWComment.waiting_comment)
+
+@router.callback_query(F.data.startswith("hw_redo"))
+async def hw_redo_ask_comment(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    hw_id = int(cb.data.split(":")[1])
+    await state.update_data(hw_id=hw_id, action="redo", src_msg=cb.message.message_id)
+    await cb.message.answer("Комментарий для ученика (почему на доработку, «-» без):")
+    await state.set_state(HWComment.waiting_comment)
+
+# ────────── шаг 2: получаем комментарий ──────────
+@router.message(HWComment.waiting_comment)
+async def hw_comment_finish(msg: Message, state: FSMContext, session):
+    data = await state.get_data()
+    hw: Homework | None = await session.get(Homework, data["hw_id"])
+    if not hw:
+        await msg.answer("Задание уже обработано.")
+        await state.clear()
+        return
+
+    comment = None if msg.text.strip() == "-" else msg.text.strip()
     student: User = await session.get(User, hw.student_id)
-    try:
-        await msg.bot.send_message(student.telegram_id, f"✅ Ваше ДЗ #{hw.id} проверено!", reply_markup=STUDENT_MENU)
-    except Exception:
-        pass
+
+    # действие зависит от начального callback
+    if data["action"] == "ok":
+        # принять: удаляем из БД
+        await session.delete(hw)
+        await msg.bot.edit_message_text(
+            "✅ Работа принята.",
+            chat_id=msg.chat.id,
+            message_id=data["src_msg"],
+        )
+        txt = "Ваше ДЗ проверено и принято!"
+        if comment:
+            txt += f"\nКомментарий преподавателя: {comment}"
+        await msg.bot.send_message(student.telegram_id, txt)
+    else:                       # redo
+        hw.answered_at = None
+        await msg.bot.edit_message_text(
+            "🔄 Отправлено на доработку.",
+            chat_id=msg.chat.id,
+            message_id=data["src_msg"],
+        )
+        txt = "ДЗ отправлено на доработку."
+        if comment:
+            txt += f"\nКомментарий преподавателя: {comment}"
+        await msg.bot.send_message(student.telegram_id, txt)
+
+    await msg.answer("✅ Готово.", reply_markup=TUTOR_MENU)
+    await state.clear()
+
