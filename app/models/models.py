@@ -10,7 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     JSON,
 )
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, backref
 
 from app.models.db import Base
 
@@ -45,7 +45,8 @@ class User(Base):
         secondary=tutor_student,
         primaryjoin=id == tutor_student.c.tutor_id,
         secondaryjoin=id == tutor_student.c.student_id,
-        backref="tutors",
+        backref=backref("tutors", lazy="selectin"),   # ← обратная связь тоже selectin
+        lazy="selectin",                              # ← ключевая строка
         cascade="save-update",
     )
     lessons = relationship(
