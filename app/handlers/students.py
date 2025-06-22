@@ -282,17 +282,22 @@ async def add_student_finish(msg: Message, state: FSMContext, session):
     st_id = data["st_id"]
 
     # Проверить существование
-    exists = (
+    exists: User | None = (
         await session.execute(select(User).where(User.telegram_id == st_id))
     ).scalar()
-    if exists:
-        await msg.answer("Этот пользователь уже зарегистрирован.", reply_markup=TUTOR_MENU)
-        await state.clear()
-        return
 
     tutor: User = (
         await session.execute(select(User).where(User.telegram_id == msg.from_user.id))
     ).scalar()
+
+    if exists:
+        if tutor in exists.tutors:
+            await msg.answer("Этот ученик уже привязан к вам.", reply_markup=TUTOR_MENU)
+        else:
+            tutor.students.append(exists)
+            await msg.answer("✅ Ученик привязан к вам.", reply_markup=TUTOR_MENU)
+        await state.clear()
+        return
 
     new_st = User(
         telegram_id=st_id,

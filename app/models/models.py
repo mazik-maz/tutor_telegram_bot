@@ -1,5 +1,6 @@
 from datetime import datetime
 from sqlalchemy import (
+    Table,
     Column,
     Integer,
     BigInteger,
@@ -13,6 +14,12 @@ from sqlalchemy.orm import relationship
 
 from app.models.db import Base
 
+tutor_student = Table(
+    "tutor_student",
+    Base.metadata,
+    Column("tutor_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
+    Column("student_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
+)
 
 # ─────────────────────────  Users  ───────────────────────── #
 class User(Base):
@@ -24,7 +31,6 @@ class User(Base):
 
     # role & binding
     is_tutor = Column(Boolean, default=False)
-    tutor_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
 
     # additional data
     parent_contact = Column(String, nullable=True)       # контакт родителя
@@ -35,9 +41,11 @@ class User(Base):
     # relationships
     students = relationship(
         "User",
-        cascade="save-update, merge",
-        backref="tutor",
-        remote_side=[id],
+        secondary=tutor_student,
+        primaryjoin=id == tutor_student.c.tutor_id,
+        secondaryjoin=id == tutor_student.c.student_id,
+        backref="tutors",
+        cascade="save-update",
     )
     lessons = relationship(
         "Lesson",
