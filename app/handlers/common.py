@@ -49,6 +49,7 @@ async def start_cmd(msg: Message, session, state: FSMContext):
                 "Ваш репетитор сообщит о занятиях.",
                 reply_markup=STUDENT_MENU,
             )
+        await state.clear()
         return
 
     # Новый пользователь → спросить роль
