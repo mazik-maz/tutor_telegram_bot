@@ -159,19 +159,20 @@ async def show_student_detail(msg: Message, state: FSMContext, session):
     await state.set_state(ViewStudent.choosing)
 
 # ╭────────────────────────── Запрос нового значения ─────────────────╮
-@router.message(ViewStudent.choosing, F.text.in_(("✏️ Имя", "🌍 UTC", "📞 Родитель", "💬 Комментарий")))
+@router.message(ViewStudent.choosing, F.text.in_(("✏️ Имя", "🌍 UTC", "📞 Родитель", "💬 Комментарий", "↩️ Назад")))
 async def ask_new_value(msg: Message, state: FSMContext):
     field_map = {
         "✏️ Имя": ("name", "Введите новое имя:"),
         "🌍 UTC": ("tz", "Введите смещение UTC (−12…+14):"),
         "📞 Родитель": ("parent", "Введите контакт родителя («-» чтобы очистить):"),
         "💬 Комментарий": ("comment", "Введите комментарий («-» чтобы удалить):"),
+        "↩️ Назад": ("back", "Отмена.")
     }
     field, prompt = field_map[msg.text]
     await state.update_data(edit_field=field)
     await msg.answer(prompt, reply_markup=ReplyKeyboardRemove())
     await state.set_state(ViewStudent.waiting_new_value)
-
+    
 # ╭────────────────────────── Сохраняем изменение ────────────────────╮
 @router.message(ViewStudent.waiting_new_value)
 async def save_new_value(msg: Message, state: FSMContext, session):
