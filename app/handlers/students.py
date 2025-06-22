@@ -227,7 +227,7 @@ async def add_student_start(msg: Message, state: FSMContext, session):
         return
 
     await msg.answer(
-        "Введите числовой Telegram-ID ученика:",
+        "Введите числовой Telegram-ID ученика. Для его определения можете переслать сообщение ученика боту @getmyid_bot",
         reply_markup=ReplyKeyboardRemove(),
     )
     await state.set_state(AddStudent.waiting_id)
