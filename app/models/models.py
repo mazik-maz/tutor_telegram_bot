@@ -31,6 +31,7 @@ class User(Base):
 
     # role & binding
     is_tutor = Column(Boolean, default=False)
+    tutor_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
 
     # additional data
     parent_contact = Column(String, nullable=True)       # контакт родителя
