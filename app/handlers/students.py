@@ -173,6 +173,12 @@ async def ask_new_value(msg: Message, state: FSMContext):
     await msg.answer(prompt, reply_markup=ReplyKeyboardRemove())
     await state.set_state(ViewStudent.waiting_new_value)
     
+@router.message(ViewStudent.choosing, F.text == "↩️ Назад")
+async def ask_new_value(msg: Message, state: FSMContext):
+    await state.clear()
+    await msg.answer("Отмена.", reply_markup=TUTOR_MENU)
+    return
+
 # ╭────────────────────────── Сохраняем изменение ────────────────────╮
 @router.message(ViewStudent.waiting_new_value)
 async def save_new_value(msg: Message, state: FSMContext, session):
