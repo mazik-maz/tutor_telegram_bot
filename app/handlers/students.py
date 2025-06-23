@@ -290,9 +290,13 @@ async def add_student_finish(msg: Message, state: FSMContext, session):
         )
     ).scalar_one_or_none()
 
-    tutor: User = (
-        await session.execute(select(User).where(User.telegram_id == msg.from_user.id))
-    ).scalar()
+    tutor = (
+        await session.execute(
+            select(User)
+            .options(selectinload(User.students))          # ← ключевая строка
+            .where(User.telegram_id == msg.from_user.id)
+        )
+    ).scalar_one()
 
     if exists:
         if tutor in exists.tutors:
